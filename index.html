@@ -1,0 +1,483 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Interlaced Video Before Upscaling: The 540-Line Ceiling, Measured</title>
+<meta name="description" content="Five deinterlacers measured against a known 1080p reference: vertical frequency response, the exact null at 540 lines (field Nyquist), whether to deinterlace before or after upscaling, and why the filter that reports success may have done nothing at all.">
+<link rel="canonical" href="https://celticgemini001.github.io/upgolab-interlaced-video-upscale/">
+<meta property="og:type" content="article">
+<meta property="og:title" content="Interlaced Video Before Upscaling: The 540-Line Ceiling, Measured">
+<meta property="og:description" content="At exactly 540 lines of vertical detail the even field of a 1080i signal measures a standard deviation of 0.000. Two of five deinterlacers return a complete null there. Everything above 540 lines is invented, not recovered.">
+<script type="application/ld+json">
+{"@context":"https://schema.org","@type":"Article",
+ "headline":"Interlaced Video Before Upscaling: The 540-Line Ceiling, Measured",
+ "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
+ "datePublished":"2026-11-17",
+ "dateModified":"2026-11-17",
+ "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-interlaced-video-upscale/"}
+</script>
+<style>
+:root{--ink:#16181d;--mut:#5b6270;--line:#e2e5ea;--acc:#0a58ca}
+*{box-sizing:border-box}
+body{margin:0;color:var(--ink);font:17px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+main{max-width:46rem;margin:0 auto;padding:3rem 1.25rem 5rem}
+h1{font-size:2rem;line-height:1.22;margin:0 0 .5rem;letter-spacing:-.02em}
+h2{font-size:1.33rem;margin:2.5rem 0 .7rem}
+h3{font-size:1.08rem;margin:1.8rem 0 .5rem}
+p,li{color:#2b3038}ul,ol{padding-left:1.3rem}li{margin:.4rem 0}
+a{color:var(--acc)}
+.lede{font-size:1.14rem;color:var(--mut);margin:0 0 1.6rem}
+.meta{font-size:.88rem;color:var(--mut);border-bottom:1px solid var(--line);padding-bottom:1rem;margin-bottom:2rem}
+table{width:100%;border-collapse:collapse;margin:1.4rem 0;font-size:.94rem}
+th,td{text-align:left;padding:.6rem .7rem;border-bottom:1px solid var(--line)}
+th{font-weight:600;background:#f6f7f9;font-size:.86rem;text-transform:uppercase;letter-spacing:.03em;color:var(--mut)}
+td.num{text-align:right;font-variant-numeric:tabular-nums}
+tr.best td{background:#f2f8f2}
+.callout{border-left:3px solid var(--acc);background:#f5f8fd;padding:.9rem 1.1rem;margin:1.6rem 0;border-radius:0 6px 6px 0}
+.callout p{margin:.3rem 0}
+pre{background:#f7f8fa;border:1px solid var(--line);border-radius:8px;padding:1rem;overflow-x:auto;font-size:.86rem}
+code{background:#f0f2f5;padding:.1rem .3rem;border-radius:3px;font-size:.9em}
+pre code{background:none;padding:0}
+footer{margin-top:4rem;padding-top:1.4rem;border-top:1px solid var(--line);font-size:.9rem;color:var(--mut)}
+.scroll{overflow-x:auto}
+</style>
+<style>
+.sisternav{margin:2rem 0 0;padding-top:1.2rem;border-top:1px solid #e2e5ea}
+.sisternav p{font-size:.8rem;text-transform:uppercase;letter-spacing:.05em;
+ color:#5b6270;margin:0 0 .6rem}
+.sisternav ul{list-style:none;padding:0;margin:0;display:flex;flex-wrap:wrap;gap:.4rem .9rem}
+.sisternav li{margin:0;font-size:.88rem;line-height:1.4}
+.sisternav a{text-decoration:none;border-bottom:1px solid #d5dae2}
+.sisternav a:hover{border-bottom-color:#0a58ca}
+</style>
+</head>
+<body>
+<main>
+<article>
+<h1>Interlaced Video Before Upscaling: The 540-Line Ceiling, Measured</h1>
+<p class="lede">Every upscaling question about interlaced footage is really two questions wearing
+one coat: does deinterlacing throw away detail, and does the order of deinterlace and upscale
+matter? Both are answerable with a reference the algorithms cannot cheat against — we hold the
+pristine 1080p progressive frames, so every dB below is loss against a known truth, not against
+another filter.</p>
+<p class="meta">17 November 2026 · synthetic 1080p reference + five ffmpeg deinterlacers, measured with numpy and ffmpeg</p>
+
+<h2>1. The test signal, and why it is not a photo</h2>
+
+<p>A natural image is a bad instrument for measuring a deinterlacer, because you cannot tell a
+recovered edge from an invented one. So the reference here is built from three regions with
+known vertical frequency content, laid out side by side in a single 1920×1080 frame:</p>
+
+<ul>
+<li><strong>Left third — diagonal edges</strong> with slope 1,7 per pixel. This is the classic
+deinterlacer failure mode: thin diagonal lines become staircases because alternate rows are missing.</li>
+<li><strong>Middle third — a vertical chirp</strong> sweeping from 2 cycles across the frame height
+to 540. 540 cycles over 1080 rows is exactly 0,25 cycles/pixel, which is the field Nyquist of a
+1080i signal. The chirp is the instrument.</li>
+<li><strong>Right third — horizontal bands</strong> at 40 px period. Vertical detail is
+near-zero by construction, so a correct deinterlacer should leave this region alone. It is the
+control: any method that scores well here is scoring well on nothing.</li>
+</ul>
+
+<p>The interlaced version is generated the way a real capture device generates it — even-numbered
+lines taken from frame <em>i</em>, odd-numbered lines taken from frame <em>i</em>+1:</p>
+
+<pre><code>import numpy as np
+from PIL import Image
+
+for i in range(N - 1):
+    a = np.array(Image.open(f"gt_{i:03d}.png")).copy()
+    b = np.array(Image.open(f"gt_{i+1:03d}.png"))
+    a[1::2] = b[1::2]          # bottom field is one frame later
+    Image.fromarray(a, "L").save(f"il_{i:03d}.png")</code></pre>
+
+<p>That one line — <code>a[1::2] = b[1::2]</code> — is the entire physics of interlacing, and every
+number below follows from it. When the scene moves, the two fields describe two different
+moments. When it does not move, they describe the same moment, which turns out to be the most
+interesting case of all.</p>
+
+<h2>2. On a locked-off shot, the best deinterlacer is the one you did not run</h2>
+
+<p>Every deinterlacing guide opens with a moving subject. Let us start with a static one instead,
+because the result is counterintuitive and it reframes everything that follows.</p>
+
+<p>With zero motion, the even and odd fields of the interlaced frame are bit-identical to the
+true frame's even and odd rows. Weaving — doing nothing, just showing the interlaced frame as if
+it were progressive — reconstructs the reference <strong>exactly</strong>. PSNR is infinite, not
+"high". Measured against that perfect baseline:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Method</th><th class="num">PSNR vs truth</th><th class="num">Diag. region HF</th><th class="num">Chirp region HF</th></tr></thead>
+<tbody>
+<tr class="best"><td>weave (no filter)</td><td class="num">∞ (bit-exact)</td><td class="num">0,00 dB</td><td class="num">0,00 dB</td></tr>
+<tr><td>yadif</td><td class="num">20,27 dB</td><td class="num">−0,14 dB</td><td class="num">−2,00 dB</td></tr>
+<tr><td>w3fdif</td><td class="num">18,08 dB</td><td class="num">−1,06 dB</td><td class="num">−2,39 dB</td></tr>
+<tr><td>kerndeint</td><td class="num">16,56 dB</td><td class="num">−2,74 dB</td><td class="num">−4,14 dB</td></tr>
+<tr><td>estdif</td><td class="num">16,43 dB</td><td class="num">−0,22 dB</td><td class="num">−3,21 dB</td></tr>
+<tr><td>bwdif</td><td class="num">15,97 dB</td><td class="num">−1,69 dB</td><td class="num">−2,82 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Read the left edge of that table carefully: on content that is not moving, <strong>every
+deinterlacer is strictly worse than doing nothing</strong>. Running yadif on a locked-off shot
+costs you 20 dB of accuracy that you already had for free. This is not a defect in yadif — it is
+what any interpolator must do when asked to replace real samples with estimates. The interpolator
+cannot know the fields agree, so it replaces half the rows anyway.</p>
+
+<div class="callout">
+<p><strong>Practical consequence:</strong> a "deinterlace everything on ingest" pipeline is
+actively destructive on any static passage — title cards, product shots on a tripod, screen
+recordings of a still UI, interview cutaways. Those shots were already lossless.</p>
+</div>
+
+<p>(The control region is deliberately absent from this table. The bands area carries no vertical
+energy in the reference, so the high-frequency ratio there is a division by approximately zero —
+it returned values like +177 dB, which is a measurement artefact and not a result. Reporting it
+would be worse than omitting it.)</p>
+
+<h2>3. The chirp: where each deinterlacer actually stops</h2>
+
+<p>Now the same static sequence, measured not as one PSNR number but as a function of vertical
+frequency. Taking the mean column of the chirp strip, transforming along the vertical axis, and
+comparing each band against the pristine reference gives the response curve directly. Values are
+relative to truth, so 0,00 dB is perfect and negative is lost detail.</p>
+
+<div class="scroll">
+<table>
+<thead><tr>
+<th>Method</th>
+<th class="num">0–<br>.063</th><th class="num">.063–<br>.125</th><th class="num">.125–<br>.188</th><th class="num">.188–<br>.250</th>
+<th class="num">.250–<br>.313</th><th class="num">.313–<br>.375</th><th class="num">.375–<br>.438</th><th class="num">.438–<br>.500</th>
+</tr></thead>
+<tbody>
+<tr><td>yadif</td><td class="num">+1,80</td><td class="num">+1,04</td><td class="num">+0,21</td><td class="num">+0,05</td><td class="num">−0,42</td><td class="num">−2,84</td><td class="num">−9,33</td><td class="num">−17,27</td></tr>
+<tr><td>w3fdif</td><td class="num">+1,97</td><td class="num">+1,75</td><td class="num">+0,99</td><td class="num">+0,46</td><td class="num">−1,88</td><td class="num">−7,80</td><td class="num">−19,46</td><td class="num">−32,34</td></tr>
+<tr><td>kerndeint</td><td class="num">+1,99</td><td class="num">+1,24</td><td class="num">+0,15</td><td class="num">−2,81</td><td class="num">−6,30</td><td class="num">−10,62</td><td class="num">−19,21</td><td class="num">−30,88</td></tr>
+<tr><td>estdif</td><td class="num">+2,14</td><td class="num">+2,05</td><td class="num">+0,61</td><td class="num">−1,20</td><td class="num">−4,56</td><td class="num">−9,65</td><td class="num">−15,53</td><td class="num">−16,28</td></tr>
+<tr><td>bwdif</td><td class="num">+2,14</td><td class="num">+2,54</td><td class="num">+1,60</td><td class="num">−0,65</td><td class="num">−7,09</td><td class="num">−22,73</td><td class="num">−28,00</td><td class="num">−30,53</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Three things fall out of this table that the PSNR ranking in §2 hid completely.</p>
+
+<p><strong>First, everything below 0,125 cycles/pixel — 270 lines of vertical detail — comes back
+slightly louder than the reference.</strong> Every method shows +1,8 to +2,5 dB in the bottom two
+bands. That is not recovery; there is nothing to recover, the reference is the reference. It is
+the interpolation filter's passband gain. A mild overshoot in the low frequencies, which is
+exactly the mechanism behind the "deinterlaced footage looks a bit crunchy" impression. The
+signal is being boosted where it was already correct.</p>
+
+<p><strong>Second, the rolloff shape differs completely from the PSNR ranking.</strong> bwdif
+scored <em>worst</em> on PSNR (15,97 dB) yet holds the <em>most</em> energy in the 0,125–0,188 band
+of any method (+1,60 dB, where yadif is at +0,21). Then it falls off a cliff: −22,73 dB at
+0,313–0,375, worse than everything else. yadif is the opposite shape — a thin margin at
+0,125–0,188 (+0,21 dB) but the flattest descent through the top octave, still only −9,33 dB at
+0,375–0,438 where bwdif has already lost 28 dB. A single PSNR number averages a narrow peak with a
+long tail and cannot tell these two apart; the curve can.</p>
+
+<p><strong>Third — and this is the one worth the whole exercise — the shape is not a gentle
+rolloff, it is a wall.</strong> Between 0,25 and 0,375 cycles per pixel (540 to 810 lines) every
+method drops 5 to 23 dB. Above 0,375 (810 lines) they are all between −15 and −32 dB, which is
+noise floor. There is no deinterlacer in this set that meaningfully reconstructs detail past
+roughly 810 lines, and most quit at 540.</p>
+
+<h2>4. The ceiling is 540 lines, and it is a hard zero</h2>
+
+<p>The chirp suggests a wall near 0,25 cycles/pixel. A sweep cannot prove a null at one specific
+frequency, so test it directly with discrete vertical gratings — one frequency at a time, three
+identical frames, measured against the pristine progressive decode of the same grating. This
+removes every confound: same content, same encoder, one variable.</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th class="num">c/px</th><th class="num">Lines</th><th class="num">yadif</th><th class="num">bwdif</th><th class="num">estdif</th><th class="num">w3fdif</th><th class="num">kerndeint</th></tr></thead>
+<tbody>
+<tr><td class="num">0,05</td><td class="num">108</td><td class="num">−0,14</td><td class="num">+0,05</td><td class="num">−0,15</td><td class="num">−0,15</td><td class="num">−0,29</td></tr>
+<tr><td class="num">0,10</td><td class="num">216</td><td class="num">+0,02</td><td class="num">+0,34</td><td class="num">−0,38</td><td class="num">−0,35</td><td class="num">−0,97</td></tr>
+<tr><td class="num">0,15</td><td class="num">324</td><td class="num">+0,01</td><td class="num">−0,25</td><td class="num">−1,12</td><td class="num">+0,27</td><td class="num">−2,01</td></tr>
+<tr><td class="num">0,20</td><td class="num">432</td><td class="num">−0,02</td><td class="num">−2,07</td><td class="num">−2,87</td><td class="num">+0,39</td><td class="num">−3,93</td></tr>
+<tr class="best"><td class="num">0,25</td><td class="num">540</td><td class="num">+0,26</td><td class="num">null</td><td class="num">null</td><td class="num">−0,65</td><td class="num">+0,26</td></tr>
+<tr><td class="num">0,30</td><td class="num">648</td><td class="num">+0,06</td><td class="num">−13,97</td><td class="num">−11,19</td><td class="num">−3,28</td><td class="num">−9,48</td></tr>
+<tr><td class="num">0,35</td><td class="num">756</td><td class="num">−3,45</td><td class="num">−46,84</td><td class="num">−20,29</td><td class="num">−8,81</td><td class="num">−13,66</td></tr>
+<tr><td class="num">0,40</td><td class="num">864</td><td class="num">−10,60</td><td class="num">−32,35</td><td class="num">−34,26</td><td class="num">−21,03</td><td class="num">−21,67</td></tr>
+<tr><td class="num">0,45</td><td class="num">972</td><td class="num">−15,17</td><td class="num">−37,48</td><td class="num">−37,79</td><td class="num">−38,57</td><td class="num">−38,00</td></tr>
+<tr><td class="num">0,49</td><td class="num">1058</td><td class="num">−38,88</td><td class="num">−52,53</td><td class="num">−53,62</td><td class="num">−51,90</td><td class="num">−50,20</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The row at 540 lines is the point of this article. At exactly 0,25 cycles/pixel, the vertical
+grating <code>0,5 + 0,45·sin(2π·0,25·y)</code> evaluates to zero on every even row and ±0,45 on
+every odd row. Measured directly on the input fields:</p>
+
+<pre><code># fr = 0.25 cycles/px, 1080 rows
+input_evenfield_std = 0.000     # the entire even field is flat
+input_oddfield_std  = 115.000   # the odd field carries the whole grating</code></pre>
+
+<p>One field of the interlaced signal is blank. Not attenuated — blank, standard deviation zero.
+That is what "540-line ceiling" means concretely, and it is the reason 1080i is described as
+having 540 lines of vertical resolution rather than 1080: at the top of its frequency range, half
+the samples are not merely noisy, they are constant.</p>
+
+<p>And the deinterlacers respond exactly as the theory predicts. bwdif and estdif, which fill
+missing rows by searching for edge directions among the <em>available</em> neighbours, find no
+edge in a flat field and return a flat result — the table shows <strong>null</strong>, meaning the
+measured amplitude at that frequency was zero to numerical precision (−269,8 dB against the
+reference). yadif and kerndeint, which lean harder on the odd row's own value, happen to carry the
+grating through at +0,26 dB. w3fdif lands at −0,65 dB.</p>
+
+<div class="callout">
+<p><strong>The honest reading:</strong> whether a given deinterlacer "recovers" 540-line detail is
+not a matter of quality. It depends on whether that particular filter copies from the surviving
+field or interpolates from neighbours. A filter that interpolates is doing the correct,
+principled thing and still returns nothing, because there is nothing to interpolate.</p>
+</div>
+
+<p>If you want to know the actual usable number rather than a wall, measure the −6 dB point. It is
+the frequency at which detail is down by a factor of two in amplitude, which corresponds to about
+what survives a re-encode and a viewing distance:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Method</th><th class="num">−3 dB</th><th class="num">−6 dB</th><th class="num">−10 dB</th><th class="num">Lines at −6 dB</th></tr></thead>
+<tbody>
+<tr class="best"><td>estdif</td><td class="num">0,368</td><td class="num">0,420</td><td class="num">0,500</td><td class="num">908 / 1080</td></tr>
+<tr><td>yadif</td><td class="num">0,361</td><td class="num">0,390</td><td class="num">0,426</td><td class="num">842 / 1080</td></tr>
+<tr><td>kerndeint</td><td class="num">0,292</td><td class="num">0,335</td><td class="num">0,363</td><td class="num">724 / 1080</td></tr>
+<tr><td>w3fdif</td><td class="num">0,306</td><td class="num">0,332</td><td class="num">0,358</td><td class="num">718 / 1080</td></tr>
+<tr><td>bwdif</td><td class="num">0,273</td><td class="num">0,289</td><td class="num">0,307</td><td class="num">624 / 1080</td></tr>
+<tr><td>reference</td><td class="num">0,500</td><td class="num">0,500</td><td class="num">0,500</td><td class="num">1080 / 1080</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Note that estdif leads here (908 lines) while it was mid-pack on raw PSNR. On static content
+the interpolating, edge-directed filters are the right choice — they preserve the most usable
+detail above 540 lines, which is precisely the region where they are inventing rather than
+recovering, but inventing <em>plausibly</em>. Whether plausible invention is a feature or a bug is
+a decision about your content, not about the filter.</p>
+
+<h2>5. The order of operations question, settled with a 4K reference</h2>
+
+<p>The recurring argument is whether to deinterlace first and then upscale, or upscale the
+interlaced frames and deinterlace at 4K. The reason people believe the second is better is
+intuitive: more pixels to interpolate over should mean a better interpolation. Testing it requires
+a 4K truth, which we have — the pristine progressive frames upscaled by the same kernel.</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Method</th><th class="num">deinterlace → 4×</th><th class="num">4× → deinterlace</th><th class="num">Difference</th></tr></thead>
+<tbody>
+<tr class="best"><td>yadif</td><td class="num">16,68 dB</td><td class="num">15,21 dB</td><td class="num">+1,47 dB</td></tr>
+<tr><td>bwdif</td><td class="num">16,24 dB</td><td class="num">15,11 dB</td><td class="num">+1,13 dB</td></tr>
+<tr><td>estdif</td><td class="num">13,56 dB</td><td class="num">13,53 dB</td><td class="num">+0,03 dB</td></tr>
+<tr><td>w3fdif</td><td class="num">13,62 dB</td><td class="num">13,52 dB</td><td class="num">+0,10 dB</td></tr>
+<tr><td>kerndeint</td><td class="num">13,74 dB</td><td class="num">16,10 dB</td><td class="num">−2,36 dB</td></tr>
+<tr><td colspan="4" style="color:#5b6270;font-style:italic">No deinterlacing at all, woven then upscaled: 11,05 dB — worst of every option tested</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Deinterlacing first wins for three of five, ties for two, and loses for one. The kerndeint
+result is the interesting negative: upscaling first helps it by 2,36 dB. kerndeint works by
+convolving a fixed small kernel across the line, and at 4K the same physical edge spans twice as
+many samples, so the kernel has more room to find it. That is a real effect, and it is specific to
+fixed-kernel methods — it does not generalise to the edge-tracing filters, whose gain is +0,03 and
++0,10 dB, i.e. nothing.</p>
+
+<p>The row that matters most is the footnote. Weaving the interlaced frames and upscaling them
+without deinterlacing at all scores 11,05 dB — five and a half dB below the worst deinterlacer.
+The comb pattern survives the upscale and is then baked in at four times the size. This is the
+<em>actual</em> common mistake, far more damaging than getting the order wrong.</p>
+
+<h2>6. Motion reverses the ranking — and one result I did not expect</h2>
+
+<p>All of the above is static content, which flatters interpolators. Add a continuous 1 px/frame
+vertical pan and the picture changes. Same reference, same 1080p truth, 39 frames:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Method</th><th class="num">PSNR, static</th><th class="num">PSNR, 1 px/frame pan</th><th class="num">Worst frame</th></tr></thead>
+<tbody>
+<tr><td>weave</td><td class="num">∞</td><td class="num">15,28 dB</td><td class="num">15,03 dB</td></tr>
+<tr class="best"><td>yadif</td><td class="num">20,27 dB</td><td class="num">17,29 dB</td><td class="num">16,34 dB</td></tr>
+<tr><td>bwdif</td><td class="num">15,97 dB</td><td class="num">16,49 dB</td><td class="num">16,32 dB</td></tr>
+<tr><td>kerndeint</td><td class="num">16,56 dB</td><td class="num">14,18 dB</td><td class="num">13,92 dB</td></tr>
+<tr><td>estdif</td><td class="num">16,43 dB</td><td class="num">9,49 dB</td><td class="num">6,77 dB</td></tr>
+<tr><td>w3fdif</td><td class="num">18,08 dB</td><td class="num">9,48 dB</td><td class="num">6,84 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>yadif and bwdif improve on motion — they blend across frames, and the pan makes the missing
+half of each frame predictable. estdif and w3fdif collapse from about 17 dB to 9,5 dB, a loss of
+seven dB, and their worst frames hit 6,8 dB, which is visibly broken.</p>
+
+<p>I want to be careful about this one, because it contradicts the usual ranking and the honest
+explanation matters more than the number. The likely cause is the content: the chirp's vertical
+detail is dominated by near-horizontal structure, and an edge-tracer looking for a clear edge
+direction in a field whose rows have just jumped by one pixel will latch onto the wrong slope. At
+0,25 px/frame — four times slower — the same comparison is:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Method</th><th class="num">0,25 px/frame</th><th class="num">1 px/frame</th></tr></thead>
+<tbody>
+<tr class="best"><td>weave</td><td class="num">27,44 dB</td><td class="num">15,28 dB</td></tr>
+<tr><td>bwdif</td><td class="num">25,13 dB</td><td class="num">16,49 dB</td></tr>
+<tr><td>yadif</td><td class="num">24,86 dB</td><td class="num">17,29 dB</td></tr>
+<tr><td>kerndeint</td><td class="num">20,82 dB</td><td class="num">14,18 dB</td></tr>
+<tr><td>w3fdif</td><td class="num">16,62 dB</td><td class="num">9,48 dB</td></tr>
+<tr><td>estdif</td><td class="num">16,14 dB</td><td class="num">9,49 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Two things to take from this, and the first is uncomfortable. <strong>On slow motion, weaving
+beats every deinterlacer.</strong> At 0,25 px/frame the comb artefact is about a quarter-pixel
+misalignment between fields — sub-pixel, mostly invisible — and the interpolation error each
+filter introduces is larger than the artefact it removes. The crossover is somewhere between
+0,25 and 1 px/frame in this content. I did not bisect it precisely, so I am reporting the two
+endpoints and the direction, not a claimed crossing point.</p>
+
+<p>Second: this is one synthetic sequence, and estdif/w3fdif's poor showing is content-specific.
+The defensible claim is narrow — on vertical-detail-dominated content with a steady pan, edge
+tracing underperformed frame blending. It is not "estdif is bad". If your material is real
+footage with natural edges, run the comparison on a clip you can see; that is the only honest
+test.</p>
+
+<h2>7. The filter that silently did nothing</h2>
+
+<p>During setup, two of the five filters returned frames bit-identical to their input. Not
+similar — identical:</p>
+
+<pre><code>$ md5sum out/005.png
+cdf6a166f63a92e5d86a72df50331f75
+
+# estdif and w3fdif, default settings, both identical to the unfiltered frame</code></pre>
+
+<p>The cause is <code>deint</code>, which defaults to <code>interlaced</code>: those filters pass
+through any frame the decoder has not flagged as interlaced. A synthetic PNG sequence has no
+interlace flag, so both filters were a no-op that reported success. The graph ran, exit code zero,
+and the numbers were the input. <code>deint=all</code> forces the work:</p>
+
+<pre><code>ffmpeg -i in.mkv -vf "estdif=deint=all" -pix_fmt gray out.mkv
+ffmpeg -i in.mkv -vf "w3fdif=deint=all" -pix_fmt gray out.mkv
+
+# yadif and bwdif: mode=send_frame gives 1 output frame per input
+ffmpeg -i in.mkv -vf "yadif=mode=send_frame" -pix_fmt gray out.mkv</code></pre>
+
+<p>This matters beyond synthetic tests, because it is the same trap in production. A frame-unflagged
+source — an MP4 whose h264 stream has no <code>field_order</code> set, or one remuxed through a
+tool that dropped the flag — silently skips the filter. Verify with <code>idet</code> before
+trusting any deinterlace step:</p>
+
+<pre><code>ffmpeg -i in.mkv -vf idet -f null - 2&gt;&amp;1 | grep detection
+
+# on the synthetic test sequence (ground truth known to be TFF):
+# Multi frame detection: TFF: 47  BFF: 0  Progressive: 0  Undetermined: 0</code></pre>
+
+<p>idet called it correctly here, 47 frames out of 47. It is reliable on clean material and much
+less so on grain-heavy footage, so treat an "Undetermined" majority as a signal to look at frames
+by hand rather than as permission to skip deinterlacing.</p>
+
+<h2>8. Field order: three decibels for getting it backwards</h2>
+
+<p>If the field order flag is wrong, the filter pairs the wrong two rows and interpolates between
+things that were never adjacent. Measured on the same 4K target, correct versus inverted:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Field order</th><th class="num">PSNR vs 4K truth</th><th class="num">Cost</th></tr></thead>
+<tbody>
+<tr class="best"><td>correct (TFF)</td><td class="num">17,08 dB</td><td class="num">—</td></tr>
+<tr><td>inverted (BFF)</td><td class="num">13,77 dB</td><td class="num">−3,32 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>3,32 dB for one wrong flag, and the visible result is characteristically worse than the number
+suggests: the detail does not blur evenly, it splits. If a deinterlaced output looks wrong in a
+way you cannot name, check the field order before you touch the filter settings.</p>
+
+<h2>9. What it costs to encode</h2>
+
+<p>All deinterlaced variants encoded libx264 CRF 23, preset medium, yuv420p, same 39 frames:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Variant</th><th class="num">Size</th><th class="num">vs progressive</th><th class="num">Filter time</th></tr></thead>
+<tbody>
+<tr class="best"><td>progressive truth</td><td class="num">257 KiB</td><td class="num">1,00×</td><td class="num">—</td></tr>
+<tr><td>estdif</td><td class="num">431 KiB</td><td class="num">1,68×</td><td class="num">6,62 s</td></tr>
+<tr><td>yadif</td><td class="num">597 KiB</td><td class="num">2,32×</td><td class="num">2,27 s</td></tr>
+<tr><td>w3fdif</td><td class="num">751 KiB</td><td class="num">2,92×</td><td class="num">3,23 s</td></tr>
+<tr><td>bwdif</td><td class="num">1041 KiB</td><td class="num">4,05×</td><td class="num">2,45 s</td></tr>
+<tr><td>kerndeint</td><td class="num">1336 KiB</td><td class="num">5,20×</td><td class="num">2,55 s</td></tr>
+<tr><td>raw interlaced (no filter)</td><td class="num">1420 KiB</td><td class="num">5,52×</td><td class="num">—</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Encoding cost tracks the same thing the frequency tables showed: estdif at 1,68× is the cleanest
+output, kerndeint at 5,20× leaves the most residual high-frequency energy for the encoder to spend
+bits on. The raw interlaced frames cost 5,52× because the comb pattern is nearly incompressible —
+another argument against skipping the step, if the quality argument were not enough.</p>
+
+<p>The filter times are the counter-argument. estdif is 2,9× slower than yadif (6,62 s vs 2,27 s
+for 39 frames at 1080p) and it is the one that collapses on motion. In this test it bought the
+best static detail retention and the worst moving-image result. That is not a recommendation, it
+is a trade-off you have to resolve against your own footage.</p>
+
+<h2>10. What I would actually do</h2>
+
+<ol>
+<li><strong>Probe before filtering.</strong> <code>idet</code> first; if the majority is
+Undetermined, inspect frames. Never deinterlace on the assumption that interlaced means interlaced.</li>
+<li><strong>Never upscale an interlaced frame.</strong> 11,05 dB versus 16,68 dB for yadif. The
+comb artefact gets four times bigger and becomes permanent.</li>
+<li><strong>Deinterlace, then upscale.</strong> It wins or ties for four of five filters and never
+loses by more than a rounding error, except for fixed-kernel methods where the reverse gains
+2,36 dB.</li>
+<li><strong>Accept the ceiling.</strong> 1080i carries at most 540 lines of true vertical detail,
+and at exactly 540 the measurement returns a null. Any upscaler claiming to restore 1080 lines of
+vertical resolution from 1080i is inventing the upper half. That is not necessarily bad — plausible
+invention is what all upscaling is — but it is not recovery, and it should not be sold as such.</li>
+<li><strong>Skip the filter when nothing moves.</strong> Weaving is bit-exact on a locked-off
+shot; every deinterlacer makes it worse. If you have per-shot control, use it.</li>
+</ol>
+
+<p>The wider point is the same one that shows up across this whole measurement series: an upscaler
+cannot recover what the pipeline before it destroyed. Interlacing destroys half the vertical
+samples of every frame by construction. Deinterlacing then does its best with the half that
+survived, and the numbers above are the size of "its best". Running a 4× model afterwards does not
+change that arithmetic — it operates on the result. If you are choosing where to spend effort on a
+restoration, the capture and the deinterlace step are upstream of everything the upscaler can do,
+and the <a href="https://upgolab.com">upscaling pipeline order that actually preserves detail</a>
+is worth understanding before you pick a model.</p>
+
+<h2>Reproducing this</h2>
+
+<p>Everything above used ffmpeg's own filters and numpy, no model weights, no vendor SDK. The
+reference generation, the interlacing step, and the five filters are three short scripts; the
+chirp and grating generators are in §1 and §4. The only non-obvious requirements are
+<code>deint=all</code> for estdif and w3fdif, <code>mode=send_frame</code> for yadif and bwdif, and
+a lossless intermediate (ffv1) so the measurement is not contaminated by a first encode.</p>
+</article>
+
+<footer>
+<nav class="sisternav" aria-label="More measured upscaling guides">
+<p>More measured guides</p>
+<ul>
+  <li><a href="https://celticgemini001.github.io/upgolab-tools/">All guides (index)</a></li>
+</ul>
+</nav>
+</footer>
+</main>
+</body>
+</html>

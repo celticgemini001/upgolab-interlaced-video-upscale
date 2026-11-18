@@ -15,7 +15,7 @@
  "author":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "publisher":{"@type":"Organization","name":"UpgoLAB","url":"https://upgolab.com"},
  "datePublished":"2026-11-17",
- "dateModified":"2026-11-17",
+ "dateModified":"2026-11-18",
  "mainEntityOfPage":"https://celticgemini001.github.io/upgolab-interlaced-video-upscale/"}
 </script>
 <style>
@@ -434,7 +434,250 @@ for 39 frames at 1080p) and it is the one that collapses on motion. In this test
 best static detail retention and the worst moving-image result. That is not a recommendation, it
 is a trade-off you have to resolve against your own footage.</p>
 
-<h2>10. What I would actually do</h2>
+<h2>10. The chroma problem: 4:2:0 averages the two fields together</h2>
+
+<p>Everything above measured luma. I had assumed chroma would behave the same way and it does
+not, and the reason is structural rather than a matter of filter settings. A 4:2:0 frame at 1080
+lines stores 540 chroma rows. A progressive 1080p frame also stores 540 chroma rows, and nobody
+considers that a defect, because there is only one image to represent. An <em>interlaced</em> frame
+holds two images — the even field and the odd field, shot 20 ms apart — and 4:2:0 forces both of
+them into the same 540 chroma rows. There is no per-field chroma plane in the format. Whatever
+the two fields disagreed about has to be resolved before the samples are stored, and the only
+resolution available at that point is an average.</p>
+
+<p>Before measuring that, one thing needed ruling out, because it is the intuitive explanation and
+it is wrong. Setting <code>-flags +ildct+ilme</code> does not touch the chroma samples at all. Same
+frame, same 4:2:0, with and without the interlace flags, encoded through ffv1, x264 with
+<code>interlaced=1:tff=1</code>, and x264 with <code>fake-interlaced=1</code> — all four decodes were
+identical to five significant figures at every frequency I tested:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Vertical chroma freq</th><th class="num">source</th><th class="num">prog 4:2:0</th><th class="num">ildct 4:2:0</th><th class="num">x264 PAFF</th><th class="num">x264 MBAFF</th></tr></thead>
+<tbody>
+<tr><td>60 cph</td><td class="num">60,46</td><td class="num">59,58</td><td class="num">59,58</td><td class="num">59,58</td><td class="num">59,58</td></tr>
+<tr><td>120 cph</td><td class="num">60,46</td><td class="num">55,08</td><td class="num">55,08</td><td class="num">55,08</td><td class="num">55,08</td></tr>
+<tr><td>180 cph</td><td class="num">60,67</td><td class="num">44,50</td><td class="num">44,50</td><td class="num">44,50</td><td class="num">44,50</td></tr>
+<tr><td>240 cph</td><td class="num">60,46</td><td class="num">28,63</td><td class="num">28,63</td><td class="num">28,63</td><td class="num">28,63</td></tr>
+<tr><td>300 cph</td><td class="num">60,46</td><td class="num">13,82</td><td class="num">13,82</td><td class="num">13,82</td><td class="num">13,82</td></tr>
+<tr><td>360 cph</td><td class="num">60,67</td><td class="num">5,02</td><td class="num">5,02</td><td class="num">5,02</td><td class="num">5,02</td></tr>
+<tr><td>450 cph</td><td class="num">60,64</td><td class="num">0,14</td><td class="num">0,14</td><td class="num">0,14</td><td class="num">0,14</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Not "close" — byte-identical. The interlace flags are metadata that tell the encoder how to
+predict and how to reorder; they carry no instruction to resample chroma. So if you have been
+assuming that your encoder "handles interlaced chroma", the honest answer is that it does nothing
+to chroma, and the loss happened earlier, in the 4:2:0 conversion, before the encoder saw it.</p>
+
+<h3>The response curve, and where it breaks</h3>
+
+<p>Measuring a pure vertical chroma sinusoid (luma held constant so only Cb moves) through a
+4:2:0 conversion, amplitude relative to the source:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Chroma frequency</th><th class="num">amplitude kept</th><th class="num">dB</th><th>Reading</th></tr></thead>
+<tbody>
+<tr class="best"><td>60 cph</td><td class="num">98,5%</td><td class="num">−0,13</td><td>free</td></tr>
+<tr><td>120 cph</td><td class="num">91,1%</td><td class="num">−0,81</td><td>free</td></tr>
+<tr><td>180 cph</td><td class="num">73,3%</td><td class="num">−2,69</td><td>first visible</td></tr>
+<tr><td>240 cph</td><td class="num">47,4%</td><td class="num">−6,49</td><td>half gone</td></tr>
+<tr><td>300 cph</td><td class="num">22,9%</td><td class="num">−12,82</td><td>past Nyquist</td></tr>
+<tr><td>360 cph</td><td class="num">8,3%</td><td class="num">−21,64</td><td>mostly gone</td></tr>
+<tr><td>450 cph</td><td class="num">0,2%</td><td class="num">−52,86</td><td>null</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>The −3 dB point falls between 180 and 240 cycles per picture height, and the response reaches a
+hard null above 450. That is consistent with 540 chroma rows: the vertical chroma Nyquist is 270
+cph, and the measured 47,4% at 240 cph is the filter roll-off just below it, not a cliff at it.
+The practical band where chroma is essentially free is under about 150 cph — which is most of a
+real photograph, and none of a saturated edge.</p>
+
+<h3>The part that actually matters: the two fields do not get the same chroma</h3>
+
+<p>The frequency sweep above is the same loss you would see from any 4:2:0 encode, progressive or
+not. It is not the interlace-specific problem. To isolate that, build a frame whose chroma
+alternates by field — even rows one colour, odd rows another, luma flat. This is the pathological
+case, but it is the correct probe, because it puts the two fields' chroma in direct opposition.</p>
+
+<p>Source: even rows Cb 173,00, odd rows Cb 83,00 — a spread of 90 levels between the fields. After
+a 4:2:0 encode and decode:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Path</th><th class="num">even-field Cb</th><th class="num">odd-field Cb</th><th class="num">spread</th><th class="num">of source</th></tr></thead>
+<tbody>
+<tr class="best"><td>source (RGB, no subsampling)</td><td class="num">173,00</td><td class="num">83,00</td><td class="num">90,00</td><td class="num">100%</td></tr>
+<tr><td>4:2:0, progressive or interlaced</td><td class="num">128,00</td><td class="num">128,00</td><td class="num">0,00</td><td class="num">0,0%</td></tr>
+<tr><td>4:2:2, interlaced</td><td class="num">173,00</td><td class="num">82,00</td><td class="num">91,00</td><td class="num">101,1%</td></tr>
+<tr><td>4:4:4, interlaced</td><td class="num">173,00</td><td class="num">82,00</td><td class="num">91,00</td><td class="num">101,1%</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Both fields emerge at 128,00 — the average of 173 and 83, to the level. Not approximately
+the average: the per-row-pair difference between the two fields measured <strong>0,00 levels</strong>
+across the whole frame, and extracting the raw plane confirms why: 3.110.400 bytes per frame =
+2.073.600 luma + 518.400 Cb + 518.400 Cr, i.e. <strong>540 chroma rows per plane where 1.080 would
+be needed</strong> to give each field its own. 4:2:2 stores 1.080, and its raw frame is 4.147.200
+bytes. There is no seam, no residual, no partial preservation. The information is simply not in the
+file.</p>
+
+<p>4:2:2 keeps it, because 4:2:2 stores one chroma row per luma row — 1.080 chroma rows, enough for
+each field to have its own. That is the whole difference, and it is not a subtle one.</p>
+
+<h3>Why this does not show up in a normal quality metric</h3>
+
+<p>It should be stated plainly that on real footage the damage is much smaller than the pathological
+probe suggests, because real chroma rarely alternates every line. Encoding a real colour test frame
+as 1080i at three subsamplings, deinterlacing with bwdif, upscaling 2× with lanczos, and comparing
+against a 4K RGB truth built without any chroma subsampling:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Capture format</th><th class="num">Cb PSNR</th><th class="num">Cr PSNR</th><th class="num">mean |dCb|</th><th class="num">Y PSNR</th></tr></thead>
+<tbody>
+<tr><td>4:2:0</td><td class="num">39,94 dB</td><td class="num">36,33 dB</td><td class="num">0,88</td><td class="num">46,54 dB</td></tr>
+<tr><td>4:2:2</td><td class="num">41,23 dB</td><td class="num">38,24 dB</td><td class="num">0,90</td><td class="num">47,29 dB</td></tr>
+<tr class="best"><td>4:4:4</td><td class="num">53,29 dB</td><td class="num">51,46 dB</td><td class="num">0,31</td><td class="num">52,95 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>4:2:0 to 4:2:2 is worth 1,29 dB on Cb and 1,91 dB on Cr. Not nothing, not dramatic. Only 0,67% of
+pixels differ by more than 8 levels between the two, and none by more than 32. A mean absolute error
+of 0,88 levels is invisible. So if you measure quality on a single still frame, you will conclude —
+correctly, for that measurement — that this is a rounding error and not worth the bitrate.</p>
+
+<h3>The case where it is worth the bitrate</h3>
+
+<p>That conclusion flips the moment you stop treating an interlaced frame as one image. Two workflows
+do exactly that, and both are common.</p>
+
+<p><strong>Bobbing to 50 fps.</strong> If you deinterlace with <code>yadif=mode=send_field</code> or
+equivalent, each field becomes its own output frame. Each output frame now needs its own chroma,
+because it <em>is</em> its own moment in time. Measured against the true 50 fps source frames, chroma
+PSNR on each field's own lines:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Capture</th><th class="num">own-field chroma</th><th class="num">vs 4:2:0</th><th class="num">file size</th></tr></thead>
+<tbody>
+<tr><td>4:2:0</td><td class="num">30,81 dB</td><td class="num">—</td><td class="num">580.807 B</td></tr>
+<tr class="best"><td>4:2:2</td><td class="num">37,99 dB</td><td class="num">+7,18 dB</td><td class="num">529.420 B</td></tr>
+<tr><td>4:4:4</td><td class="num">37,43 dB</td><td class="num">+6,62 dB</td><td class="num">517.239 B</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>7,18 dB is a different category of number from 1,29 dB. And on the pathological frame the failure
+is total rather than degraded: bobbing a 4:2:0 source produces two 50 fps frames that both read
+Cb 128,00, while bobbing a 4:2:2 source reproduces 173,00 and 82,00 — the two fields' actual
+colours, against true values of 173 and 83.</p>
+
+<p><strong>Freeze-framing, and anything that treats a field as a picture.</strong> A paused frame in
+a player is one field displayed on its own. If the chroma for that field was averaged with the other
+field's, the pause shows a colour that was never in either image. This is the chroma analogue of the
+comb artefact, except that a comb is visible as a texture and a wrong colour reads as correct.</p>
+
+<p><strong>Fast colour motion.</strong> Mean per-field chroma difference on the real test clip was
+1,52 levels for Cb and 3,04 for Cr — small on average, but 4,0% of pixels exceeded 8 levels and the
+99th percentile was 43 (Cb) and 98 (Cr). Averaging is harmless where the two fields agree and
+destructive exactly where they do not: at the leading edge of a moving saturated object, which is
+where the eye goes.</p>
+
+<h3>The fix that does not work, measured</h3>
+
+<p>The obvious repair is to deinterlace first, while the data is still full-resolution, and
+subsample afterwards. Doing that inside a 4:4:4 intermediate and then encoding 4:2:0 progressive
+gave, against the true 50 fps frames:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Order</th><th class="num">kept-field Cb</th><th class="num">kept-field Cr</th></tr></thead>
+<tbody>
+<tr class="best"><td>4:2:0 → deinterlace (the common path)</td><td class="num">31,21 dB</td><td class="num">25,86 dB</td></tr>
+<tr><td>deinterlace at 4:4:4 → 4:2:0</td><td class="num">29,86 dB</td><td class="num">23,97 dB</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>Reordering cost 1,35 dB on Cb and 1,89 dB on Cr. It is <em>worse</em>, and the reason is
+uncomfortable: the 4:2:0 average is destructive, but it is also a decent estimate of what bwdif has
+to invent for the field it discards. bwdif interpolates the missing field by blending across the
+retained one, and a chroma plane that already contains both fields is closer to that blend than a
+clean single-field plane is. Measuring the frame as a whole rather than field-by-field shows the
+same thing much more strongly — whole-frame chroma PSNR was 37,17 dB for 4:2:0 against 31,18 for
+4:2:2, a 5,99 dB penalty for doing it "right".</p>
+
+<p>So the trade is explicit, and it cannot be resolved by a cleverer pipeline order. Preserving
+per-field chroma at capture makes the retained field better (+8,88 dB) and the reconstructed field
+worse (−4,60 dB), because the reconstruction had been leaning on the average. If you are delivering
+25 fps, that trade is a loss. If you are bobbing to 50 fps, or freezing frames, or the colour motion
+is fast, the retained field is not the only thing you care about and the per-field information is
+the only correct answer. There is no ordering of filters that recovers it later, because it was never
+written down.</p>
+
+<h3>What 4:2:2 costs</h3>
+
+<p>Not a fixed multiplier. Same 1080i content, x264 CRF 18, three different sources:</p>
+
+<div class="scroll">
+<table>
+<thead><tr><th>Source</th><th class="num">4:2:0</th><th class="num">4:2:2</th><th class="num">ratio</th><th class="num">4:4:4</th><th class="num">ratio</th></tr></thead>
+<tbody>
+<tr><td>testsrc2 (synthetic detail)</td><td class="num">2.124.608</td><td class="num">2.374.430</td><td class="num">1,118×</td><td class="num">2.053.120</td><td class="num">0,966×</td></tr>
+<tr><td>mandelbrot (smooth gradients)</td><td class="num">2.358.225</td><td class="num">3.246.723</td><td class="num">1,377×</td><td class="num">3.405.960</td><td class="num">1,444×</td></tr>
+<tr><td>life (high-frequency texture)</td><td class="num">9.387.571</td><td class="num">9.234.597</td><td class="num">0,984×</td><td class="num">9.415.426</td><td class="num">1,003×</td></tr>
+</tbody>
+</table>
+</div>
+
+<p>1,12× on the synthetic clip, 1,38× on smooth gradients, and slightly <em>smaller</em> on the
+high-frequency source. The pattern is that extra chroma resolution costs bits only when the extra
+information is compressible — smooth gradients have real chroma to carry and it is easy to code, so
+it gets coded; noise-like content has chroma the encoder was discarding anyway, and at CRF 18 on a
+high-entropy source the rate is set by luma and the chroma channels are near-free. Crf 12 on the
+synthetic clip widened the gap to 1,198× (3.019.912 → 3.616.649 B). This is the same phenomenon as
+the negative result in the 4:2:0 guide: at high quality the subsampled format sometimes loses, and
+at low quality it does not, because at low quality everything is being thrown away.</p>
+
+<p>Do not take a single ratio from a single clip. Measure on your own footage at your own CRF, or
+budget 1,2× and treat anything better as a gift.</p>
+
+<h3>What this changes in practice</h3>
+
+<ol>
+<li><strong>Stop expecting the interlace flag to protect chroma.</strong> It measured bit-identical
+across four encoder configurations. Any chroma loss in an interlaced pipeline happened at the 4:2:0
+conversion, before encoding.</li>
+<li><strong>If you are bobbing to 50 fps, capture 4:2:2.</strong> 7,18 dB of own-field chroma is the
+largest single effect found anywhere in this series of interlace measurements, and it is the one
+case where the per-field information cannot be reconstructed at all.</li>
+<li><strong>If you are delivering 25 fps from an existing 4:2:0 file, do not re-encode to 4:2:2
+first.</strong> The information is gone; a 4:2:2 encode of a 4:2:0 source adds bitrate and nothing
+else. Work with what is there.</li>
+<li><strong>Do not put the deinterlace before the subsample and call it a fix.</strong> Measured
+1,35–1,89 dB worse on the retained field, 5,99 dB worse whole-frame. The averaging you were trying
+to avoid was also doing part of bwdif's job.</li>
+<li><strong>Calibrate the cost on your own content.</strong> The 4:2:2 penalty ranged from 0,984× to
+1,377× across three sources in this test. There is no universal number.</li>
+</ol>
+
+<p>The pattern that runs through this whole guide holds here too, in a sharper form. Luma losses are
+graded — you can see them, measure them, and trade against bitrate. Field chroma loss is
+<em>categorical</em>: below about 150 cph it does nothing at all, and at the point where the two
+fields disagree it substitutes one colour for two, exactly, with no residual to detect. A metric
+computed on a single still cannot see it, which is why the quality numbers above look so
+reassuring. The condition that exposes it is not image quality but image <em>count</em>: the moment
+one interlaced frame becomes two pictures, the average stops being a reasonable approximation and
+starts being an answer to a question nobody asked.</p>
+
+<h2>11. What I would actually do</h2>
 
 <ol>
 <li><strong>Probe before filtering.</strong> <code>idet</code> first; if the majority is
@@ -468,6 +711,37 @@ reference generation, the interlacing step, and the five filters are three short
 chirp and grating generators are in §1 and §4. The only non-obvious requirements are
 <code>deint=all</code> for estdif and w3fdif, <code>mode=send_frame</code> for yadif and bwdif, and
 a lossless intermediate (ffv1) so the measurement is not contaminated by a first encode.</p>
+
+<p>§10 needs one extra ingredient: a frame whose chroma alternates by field. It is three lines of
+numpy, and the only thing to get right is that <code>Image.open(...).convert("YCbCr")</code> uses
+JPEG-style full-range coefficients, so the Cb values you write are not the Cb values you read back
+unless you stay well inside 0–255. Keeping the offset at ±45 avoids clipping and makes the
+before/after comparison exact:</p>
+
+<pre><code>import numpy as np
+from PIL import Image
+W, H = 1920, 1080
+src = np.full((H, W), 128.0)          # luma flat
+b = np.full((H, W), 128.0)
+b[0::2] = 128 + 90                    # even rows
+b[1::2] = 128 - 90                    # odd rows
+Image.fromarray(np.dstack([src, src, b]).astype(np.uint8), "RGB").save("comb.png")
+
+# encode without and with genuine interlace flags -- chroma comes out identical
+ffmpeg -y -i comb.png -pix_fmt yuv420p -c:v ffv1 a.mkv
+ffmpeg -y -i comb.png -pix_fmt yuv420p -flags +ildct+ilme -top 1 -c:v ffv1 b.mkv
+
+# prove the planes are shared: raw frame = Y + Cb(540 rows) + Cr(540 rows)
+ffmpeg -y -i b.mkv -frames:v 1 -pix_fmt yuv420p -f rawvideo raw.yuv
+ls -l raw.yuv     # 3110400 = 1920*1080 + 2*(960*540)</code></pre>
+
+<p>For the metrics: amplitude is the magnitude of the DFT bin at the test frequency, taken over a
+column-averaged strip so horizontal noise cancels. Field-wise comparison means slicing
+<code>U[0::2]</code> and <code>U[1::2]</code> and averaging each separately — if the two means are
+equal to the level, the plane is shared. The bob tests use
+<code>yadif=mode=send_field:deint=all</code>, which emits two output frames per input frame; the
+50 fps reference frames must be compared against output frames <code>2i+1</code> and
+<code>2i+2</code>, on each field's own row parity, or the comparison is meaningless.</p>
 </article>
 
 <footer>
